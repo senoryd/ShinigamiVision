@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#090909">
+<title>Shinigami Vision — Detector facial</title>
+<style>
+:root{color-scheme:dark;--red:#ff2638;--muted:#a5a5a5}
+*{box-sizing:border-box}
+body{margin:0;background:#080808;color:#f5f5f5;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;min-height:100dvh}
+header{padding:18px 16px 12px;text-align:center;border-bottom:1px solid #292929}
+h1{font-size:1.15rem;letter-spacing:.18em;margin:0;color:var(--red);text-transform:uppercase}
+.sub{font-size:.78rem;color:#aaa;margin-top:6px}
+main{max-width:760px;margin:auto;padding:14px}
+.stage{position:relative;width:100%;background:#111;overflow:hidden;border:1px solid #343434;border-radius:12px;aspect-ratio:3/4;max-height:68dvh;display:flex;align-items:center;justify-content:center}
+video,canvas{position:absolute;width:100%;height:100%;inset:0;object-fit:cover}
+video{transform:scaleX(-1)}
+canvas{pointer-events:none}
+.placeholder{color:#777;text-align:center;padding:24px;line-height:1.6}
+.controls{display:flex;gap:10px;margin-top:12px}
+button{flex:1;border:1px solid var(--red);border-radius:9px;padding:13px 10px;font-weight:700;background:var(--red);color:#080808;font-size:.95rem}
+button.secondary{background:#151515;color:#eee;border-color:#555}
+button:disabled{opacity:.45}
+.panel{margin-top:12px;border:1px solid #292929;border-radius:10px;padding:12px;background:#101010}
+label{display:block;font-size:.82rem;color:#bbb;margin-bottom:7px}
+input{width:100%;padding:12px;border:1px solid #454545;border-radius:8px;background:#080808;color:#fff;font-size:1rem}
+.note{font-size:.78rem;line-height:1.5;color:#999;margin:12px 2px}
+.status{font-size:.83rem;color:#ff6470;min-height:1.3em;margin-top:10px}
+.tagline{color:var(--red);font-family:ui-monospace,monospace;letter-spacing:.05em}
+</style>
+</head>
+<body>
+<header>
+  <h1>SHINIGAMI VISION</h1>
+  <div class="sub">VISIÓN FACIAL · INTERFAZ INSPIRADA EN EL ANIME</div>
+</header>
+<main>
+  <div class="stage" id="stage">
+    <div class="placeholder" id="placeholder">Activa la cámara para detectar rostros.<br><span class="tagline">FACE DETECTION SYSTEM // STANDBY</span></div>
+    <video id="video" autoplay muted playsinline hidden></video>
+    <canvas id="overlay"></canvas>
+  </div>
+  <div class="controls">
+    <button id="start">Activar cámara</button>
+    <button id="stop" class="secondary" disabled>Detener</button>
+  </div>
+  <div class="panel">
+    <label for="alias">Etiqueta que aparecerá sobre cada rostro detectado</label>
+    <input id="alias" maxlength="28" value="NOMBRE DESCONOCIDO" autocomplete="off">
+    <div class="note">Personaliza el texto de la etiqueta. La herramienta detecta la presencia y posición de rostros; no identifica personas ni averigua sus nombres o datos personales.</div>
+  </div>
+  <div class="status" id="status" role="status">Sistema en espera.</div>
+  <p class="note">La cámara requiere permiso y normalmente funciona al abrir este archivo desde un sitio HTTPS o desde localhost. El procesamiento se realiza en el dispositivo; el modelo de detección se descarga desde internet la primera vez.</p>
+</main>
+<script type="module">
+import { FaceDetector, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+const video=document.getElementById('video');
+const canvas=document.getElementById('overlay');
+const ctx=canvas.getContext('2d');
+const startBtn=document.getElementById('start');
+const stopBtn=document.getElementById('stop');
+const statusEl=document.getElementById('status');
+const placeholder=document.getElementById('placeholder');
+const aliasInput=document.getElementById('alias');
+let detector=null, stream=null, running=false, raf=0, lastDetect=0, faces=[];
+
+function fitCanvas(){
+  const rect=canvas.getBoundingClientRect(), dpr=Math.min(window.devicePixelRatio||1,2);
+  canvas.width=Math.round(rect.width*dpr); canvas.height=Math.round(rect.height*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+function draw(){
+  const w=canvas.clientWidth,h=canvas.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  // Scanline / corner accents
+  ctx.strokeStyle='rgba(255,38,56,.7)';ctx.lineWidth=1;
+  const s=18;
+  [[8,8,1,1],[w-8,8,-1,1],[8,h-8,1,-1],[w-8,h-8,-1,-1]].forEach(([x,y,dx,dy])=>{
+    ctx.beginPath();ctx.moveTo(x,y+dy*s);ctx.lineTo(x,y);ctx.lineTo(x+dx*s,y);ctx.stroke();
+  });
+  for(const f of faces){
+    const b=f.boundingBox;
+    // MediaPipe coordinates refer to the unmirrored source; mirror them for the selfie preview.
+    const x=w-(b.originX+b.width)*w/video.videoWidth;
+    const y=b.originY*h/video.videoHeight;
+    const bw=b.width*w/video.videoWidth,bh=b.height*h/video.videoHeight;
+    ctx.strokeStyle='#ff2638';ctx.lineWidth=2;ctx.strokeRect(x,y,bw,bh);
+    const label=(aliasInput.value.trim()||'NOMBRE DESCONOCIDO').toUpperCase();
+    ctx.font='bold 11px ui-monospace,monospace';
+    const textW=Math.min(w-20,Math.max(150,ctx.measureText(label).width+18));
+    const lx=Math.max(8,Math.min(w-textW-8,x));
+    const ly=Math.max(8,y-38);
+    ctx.fillStyle='rgba(5,5,5,.9)';ctx.fillRect(lx,ly,textW,31);
+    ctx.strokeStyle='#ff2638';ctx.lineWidth=1;ctx.strokeRect(lx,ly,textW,31);
+    ctx.fillStyle='#ff2638';ctx.fillText(label.slice(0,28),lx+8,ly+13);
+    ctx.fillStyle='#f4f4f4';ctx.font='9px ui-monospace,monospace';
+    ctx.fillText('LIFESPAN: --  /  ID: UNVERIFIED',lx+8,ly+25);
+    // Crosshair marks
+    ctx.strokeStyle='rgba(255,38,56,.75)';ctx.beginPath();
+    ctx.moveTo(x+bw/2-7,y+bh/2);ctx.lineTo(x+bw/2+7,y+bh/2);
+    ctx.moveTo(x+bw/2,y+bh/2-7);ctx.lineTo(x+bw/2,y+bh/2+7);ctx.stroke();
+  }
+}
+async function loop(now){
+  if(!running)return;
+  if(video.readyState>=2 && now-lastDetect>100){
+    lastDetect=now;
+    try{faces=detector.detectForVideo(video,now).detections||[];}catch(e){}
+    statusEl.textContent=faces.length
+      ? `Rostros detectados: ${faces.length} · Análisis local activo.`
+      : 'Buscando rostros…';
+    draw();
+  }
+  raf=requestAnimationFrame(loop);
+}
+async function start(){
+  startBtn.disabled=true;statusEl.textContent='Preparando modelo de detección…';
+  try{
+    const vision=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+    detector=await FaceDetector.createFromOptions(vision,{
+      baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite',delegate:'GPU'},
+      runningMode:'VIDEO',minDetectionConfidence:.55
+    });
+    stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:'user',width:{ideal:1280},height:{ideal:720}}});
+    video.srcObject=stream;video.hidden=false;placeholder.hidden=true;
+    await video.play();fitCanvas();running=true;stopBtn.disabled=false;
+    statusEl.textContent='Cámara activa. Apunta hacia un rostro.';
+    raf=requestAnimationFrame(loop);
+  }catch(e){
+    statusEl.textContent='No se pudo iniciar: '+(e.name==='NotAllowedError'?'permiso de cámara denegado.':e.message||'revisa los permisos y la conexión.');
+    startBtn.disabled=false;
+    if(stream)stream.getTracks().forEach(t=>t.stop());
+  }
+}
+function stop(){
+  running=false;cancelAnimationFrame(raf);
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  stream=null;video.srcObject=null;video.hidden=true;placeholder.hidden=false;
+  faces=[];ctx.clearRect(0,0,canvas.width,canvas.height);
+  startBtn.disabled=false;stopBtn.disabled=true;statusEl.textContent='Cámara detenida.';
+}
+startBtn.addEventListener('click',start);stopBtn.addEventListener('click',stop);
+window.addEventListener('resize',()=>{fitCanvas();draw();});
+</script>
+</body>
+</html>
